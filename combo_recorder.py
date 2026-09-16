@@ -2,11 +2,20 @@ import os
 import tkinter as tk
 from tkinter import messagebox
 from openpyxl import load_workbook
+import tkinter.font as tkfont
 
 from seed import str2seed, is_valid_seed
 
 INGREDIENTS_FILE = "合成宝袋组件.xlsx"
 PROPS_FILE = "以撒的结合忏悔+_全道具信息表.xlsx"
+
+# 这些字体变量会在 __main__ 中根据系统可用字体动态赋值
+FONT_NORMAL = None
+FONT_BOLD = None
+FONT_TITLE = None
+FONT_SMALL = None
+FONT_MONO = None
+FONT_SEED = None
 
 
 # ---------- 通用工具 ----------
@@ -98,22 +107,22 @@ class ComboRecorder:
         seed_frame = tk.Frame(root, bg="#FAFAFA")
         seed_frame.grid(row=0, column=0, pady=(8, 2))
 
-        tk.Label(seed_frame, text="种子：", font=("Microsoft YaHei", 10),
+        tk.Label(seed_frame, text="种子：", font=FONT_NORMAL,
                  bg="#FAFAFA").pack(side="left")
-        self.seed_entry = tk.Entry(seed_frame, font=("Consolas", 12),
-                                    width=12, justify="center")
+        self.seed_entry = tk.Entry(seed_frame, font=FONT_SEED,
+                                   width=12, justify="center")
         self.seed_entry.pack(side="left", padx=6)
         self.seed_entry.bind("<Return>", lambda e: self.apply_seed())
 
         for txt, cmd in [("应用", self.apply_seed), ("清除", self.clear_seed)]:
             tk.Button(seed_frame, text=txt, width=5,
-                      font=("Microsoft YaHei", 9),
+                      font=FONT_SMALL,
                       bg="#FFFFFF", relief="solid", bd=1, cursor="hand2",
                       command=cmd).pack(side="left", padx=2)
 
         self.seed_status = tk.Label(root, text="当前无种子（记录到 combinations.txt）",
-                                     font=("Microsoft YaHei", 9),
-                                     bg="#FAFAFA", fg="#616161")
+                                    font=FONT_SMALL,
+                                    bg="#FAFAFA", fg="#616161")
         self.seed_status.grid(row=1, column=0, pady=(0, 4))
 
         # ============ 顶部状态 ============
@@ -121,14 +130,14 @@ class ComboRecorder:
         top.grid(row=2, column=0, pady=(2, 4))
 
         self.total_label = tk.Label(top, text="总数：0 / 8",
-                                     font=("Microsoft YaHei", 14, "bold"),
-                                     bg="#FAFAFA", fg="#212121")
+                                    font=FONT_TITLE,
+                                    bg="#FAFAFA", fg="#212121")
         self.total_label.pack()
 
         self.recipe_label = tk.Label(top, text="当前配方：（空）",
-                                      font=("Microsoft YaHei", 10),
-                                      bg="#FAFAFA", fg="#1976D2",
-                                      wraplength=640, justify="center")
+                                     font=FONT_NORMAL,
+                                     bg="#FAFAFA", fg="#1976D2",
+                                     wraplength=640, justify="center")
         self.recipe_label.pack(pady=(4, 0))
 
         # ============ 物品按钮 ============
@@ -140,7 +149,7 @@ class ComboRecorder:
         for i, (order, name) in enumerate(ingredients):
             btn = tk.Button(btn_frame, text=f"{name}\n0",
                             width=13, height=2,
-                            font=("Microsoft YaHei", 9),
+                            font=FONT_SMALL,
                             bg="#FFFFFF", activebackground="#E3F2FD",
                             relief="solid", bd=1, cursor="hand2",
                             command=lambda n=name: self.add_item(n))
@@ -153,21 +162,21 @@ class ComboRecorder:
         prop_header.grid(row=4, column=0, pady=(8, 2), sticky="ew", padx=20)
 
         tk.Label(prop_header, text="道具检索：",
-                 font=("Microsoft YaHei", 10, "bold"),
+                 font=FONT_BOLD,
                  bg="#FAFAFA").pack(side="left")
 
-        self.prop_search = tk.Entry(prop_header, font=("Microsoft YaHei", 10),
-                                     width=22)
+        self.prop_search = tk.Entry(prop_header, font=FONT_NORMAL,
+                                    width=22)
         self.prop_search.pack(side="left", padx=6)
         self.prop_search.bind("<KeyRelease>", self.on_search_change)
         self.prop_search.bind("<Return>", self.on_search_enter)
         self.prop_search.bind("<Escape>", lambda e: self.clear_prop_search())
 
-        tk.Button(prop_header, text="清空检索", font=("Microsoft YaHei", 9),
+        tk.Button(prop_header, text="清空检索", font=FONT_SMALL,
                   bg="#FFFFFF", relief="solid", bd=1, cursor="hand2",
                   command=self.clear_prop_search).pack(side="left", padx=2)
 
-        tk.Button(prop_header, text="清除已选", font=("Microsoft YaHei", 9),
+        tk.Button(prop_header, text="清除已选", font=FONT_SMALL,
                   bg="#FFFFFF", relief="solid", bd=1, cursor="hand2",
                   command=self.clear_prop_selection).pack(side="left", padx=2)
 
@@ -175,13 +184,13 @@ class ComboRecorder:
         info_frame.grid(row=5, column=0, pady=(2, 2))
 
         self.match_label = tk.Label(info_frame, text=f"共 {len(self.props)} 个道具",
-                                     font=("Microsoft YaHei", 9),
-                                     bg="#FAFAFA", fg="#616161")
+                                    font=FONT_SMALL,
+                                    bg="#FAFAFA", fg="#616161")
         self.match_label.pack(side="left", padx=(0, 12))
 
         self.selected_label = tk.Label(info_frame, text="未选择道具",
-                                        font=("Microsoft YaHei", 10),
-                                        bg="#FAFAFA", fg="#9E9E9E")
+                                       font=FONT_NORMAL,
+                                       bg="#FAFAFA", fg="#9E9E9E")
         self.selected_label.pack(side="left")
 
         # 道具列表
@@ -191,13 +200,13 @@ class ComboRecorder:
 
         prop_scroll = tk.Scrollbar(prop_list_frame, orient="vertical")
         self.prop_listbox = tk.Listbox(prop_list_frame, height=6,
-                                        font=("Consolas", 10),
-                                        yscrollcommand=prop_scroll.set,
-                                        activestyle="none",
-                                        bg="#FFFFFF", bd=1, relief="solid",
-                                        highlightthickness=0,
-                                        selectbackground="#BBDEFB",
-                                        selectforeground="#000000")
+                                       font=FONT_MONO,
+                                       yscrollcommand=prop_scroll.set,
+                                       activestyle="none",
+                                       bg="#FFFFFF", bd=1, relief="solid",
+                                       highlightthickness=0,
+                                       selectbackground="#BBDEFB",
+                                       selectforeground="#000000")
         prop_scroll.config(command=self.prop_listbox.yview)
         self.prop_listbox.grid(row=0, column=0, sticky="ew")
         prop_scroll.grid(row=0, column=1, sticky="ns")
@@ -217,7 +226,7 @@ class ComboRecorder:
             ("删除记录文件", self.clear_records),
         ]:
             tk.Button(bottom, text=text, width=12,
-                      font=("Microsoft YaHei", 10),
+                      font=FONT_NORMAL,
                       bg="#FFFFFF", activebackground="#E3F2FD",
                       relief="solid", bd=1, cursor="hand2",
                       command=cmd).pack(side="left", padx=5)
@@ -230,7 +239,7 @@ class ComboRecorder:
         list_frame.grid_rowconfigure(1, weight=1)
 
         tk.Label(list_frame, text="已记录：",
-                 font=("Microsoft YaHei", 10, "bold"),
+                 font=FONT_BOLD,
                  bg="#FAFAFA", fg="#424242").grid(row=0, column=0, sticky="w")
 
         inner = tk.Frame(list_frame, bg="#FAFAFA")
@@ -239,11 +248,11 @@ class ComboRecorder:
         inner.grid_rowconfigure(0, weight=1)
 
         scrollbar = tk.Scrollbar(inner, orient="vertical")
-        self.listbox = tk.Listbox(inner, font=("Consolas", 10),
-                                   yscrollcommand=scrollbar.set,
-                                   activestyle="none",
-                                   bg="#FFFFFF", bd=1, relief="solid",
-                                   highlightthickness=0)
+        self.listbox = tk.Listbox(inner, font=FONT_MONO,
+                                  yscrollcommand=scrollbar.set,
+                                  activestyle="none",
+                                  bg="#FFFFFF", bd=1, relief="solid",
+                                  highlightthickness=0)
         scrollbar.config(command=self.listbox.yview)
         self.listbox.grid(row=0, column=0, sticky="nsew")
         scrollbar.grid(row=0, column=1, sticky="ns")
@@ -320,7 +329,7 @@ class ComboRecorder:
     # ---------- 道具检索 ----------
     def on_search_change(self, event=None):
         if event and event.keysym in ("Return", "Escape", "Up", "Down",
-                                       "Left", "Right", "Tab"):
+                                      "Left", "Right", "Tab"):
             return
 
         query = self.prop_search.get().strip().lower()
@@ -438,6 +447,48 @@ class ComboRecorder:
 
 if __name__ == "__main__":
     root = tk.Tk()
+
+    # ---------- 动态选择跨平台字体 ----------
+    def get_font(family_candidates, size, weight="normal"):
+        """根据系统可用字体返回 tkfont.Font 对象"""
+        available = set(tkfont.families())
+        for family in family_candidates:
+            if family in available:
+                return tkfont.Font(family=family, size=size, weight=weight)
+        # 如果都没找到，返回默认字体
+        return tkfont.Font(size=size, weight=weight)
+
+    # 中文字体候选（按优先级）
+    CN_FAMILIES = [
+        "Microsoft YaHei",      # Windows
+        "PingFang SC",          # macOS
+        "Noto Sans CJK SC",     # Ubuntu (fonts-noto-cjk)
+        "WenQuanYi Micro Hei",  # Ubuntu (fonts-wqy-microhei)
+        "WenQuanYi Zen Hei",    # Ubuntu (fonts-wqy-zenhei)
+        "SimHei",               # Windows 备选
+        "sans-serif",           # 保底
+    ]
+
+    # 等宽字体候选（按优先级）
+    MONO_FAMILIES = [
+        "Consolas",             # Windows
+        "DejaVu Sans Mono",     # Ubuntu 常见
+        "Noto Sans Mono",       # Ubuntu 常见
+        "Courier New",          # 跨平台备选
+        "monospace",            # 保底
+    ]
+
+    # 生成全局字体对象
+    FONT_NORMAL = get_font(CN_FAMILIES, 10)
+    FONT_BOLD = get_font(CN_FAMILIES, 10, "bold")
+    FONT_TITLE = get_font(CN_FAMILIES, 14, "bold")
+    FONT_SMALL = get_font(CN_FAMILIES, 9)
+    FONT_MONO = get_font(MONO_FAMILIES, 10)
+    FONT_SEED = get_font(MONO_FAMILIES, 12)
+
+    # 设置全局默认字体
+    root.option_add("*Font", FONT_NORMAL)
+
     ingredients = load_ingredients()
     props = load_props()
     app = ComboRecorder(root, ingredients, props)
