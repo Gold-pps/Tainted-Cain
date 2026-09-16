@@ -9,6 +9,26 @@ from seed import str2seed, is_valid_seed
 INGREDIENTS_FILE = "合成宝袋组件.xlsx"
 PROPS_FILE = "以撒的结合忏悔+_全道具信息表.xlsx"
 
+# ============ 精灵图配置 ============
+SPRITE_SHEET = "Crafting_ui_sprite.png"
+SPRITE_SIZE = 40
+
+# 图标在 sprite sheet 中的位置 (x, y, 宽, 高)
+# 顶部：从第一行第 2 格 (16,0) 开始，按从左到右、从上到下，共 26 个
+# 顶部 28 个：从第一行第 2 格 (16,0) 开始，遍历 4 行，跳过 (0,0)
+SPRITE_POSITIONS = []
+_count = 0
+for _y in range(0, 64, 16):        # 4 行
+    for _x in range(0, 128, 16):   # 每行 8 格
+        if _count == 0 and _x == 0 and _y == 0:
+            continue               # 跳过第一行第一格
+        SPRITE_POSITIONS.append((_x, _y, 16, 16))
+        _count += 1
+        if _count >= 28:
+            break
+    if _count >= 28:
+        break
+
 # 这些字体变量会在 __main__ 中根据系统可用字体动态赋值
 FONT_NORMAL = None
 FONT_BOLD = None
@@ -83,17 +103,49 @@ def save_combination(filename, record):
         f.write(record + "\n")
 
 
+# ---------- 精灵图切分 ----------
+def load_sprites(sheet_path, item_names, size=40):
+    """按 SPRITE_POSITIONS 切图"""
+    from PIL import Image, ImageTk
+
+    sprites = {}
+    refs = []
+
+    if not os.path.exists(sheet_path):
+        print(f"⚠️ 找不到 {sheet_path}，将使用纯文字按钮")
+        return sprites, refs
+
+    try:
+        sheet = Image.open(sheet_path).convert("RGBA")
+    except Exception as e:
+        print(f"⚠️ 打开 {sheet_path} 失败：{e}")
+        return sprites, refs
+
+    for i, name in enumerate(item_names):
+        if i >= len(SPRITE_POSITIONS):
+            break
+        x, y, cw, ch = SPRITE_POSITIONS[i]
+        img = sheet.crop((x, y, x + cw, y + ch))
+        img = img.resize((size, size), Image.NEAREST)
+
+        photo = ImageTk.PhotoImage(img)
+        sprites[name] = photo
+        refs.append(photo)
+
+    return sprites, refs
+
 # ---------- 主界面 ----------
 class ComboRecorder:
-    def __init__(self, root, ingredients, props):
+    def __init__(self, root, ingredients, props, sprites):
         self.root = root
         self.root.title("合成宝袋配方记录器")
-        self.root.geometry("700x820")
+        self.root.geometry("720x960")
         self.root.configure(bg="#FAFAFA")
         self.root.resizable(True, True)
 
         self.ingredients = ingredients
         self.props = props
+        self.sprites = sprites
         self.filtered_props = list(props)
         self.quantities = {name: 0 for _, name in ingredients}
         self.selected_prop = None
@@ -137,22 +189,41 @@ class ComboRecorder:
         self.recipe_label = tk.Label(top, text="当前配方：（空）",
                                      font=FONT_NORMAL,
                                      bg="#FAFAFA", fg="#1976D2",
-                                     wraplength=640, justify="center")
+                                     wraplength=660, justify="center")
         self.recipe_label.pack(pady=(4, 0))
 
-        # ============ 物品按钮 ============
+        # ============ 物品按钮（带图标） ============
         btn_frame = tk.Frame(root, bg="#FAFAFA")
         btn_frame.grid(row=3, column=0, pady=2)
 
         self.buttons = {}
         COLS = 4
         for i, (order, name) in enumerate(ingredients):
-            btn = tk.Button(btn_frame, text=f"{name}\n0",
-                            width=13, height=2,
-                            font=FONT_SMALL,
-                            bg="#FFFFFF", activebackground="#E3F2FD",
-                            relief="solid", bd=1, cursor="hand2",
-                            command=lambda n=name: self.add_item(n))
+            icon = sprites.get(name)
+
+            if icon:
+                btn = tk.Button(
+                    btn_frame,
+                    image=icon,
+                    text="0",
+                    compound="top",
+                    width=76, height=72,
+                    font=FONT_NORMAL,
+                    bg="#FFFFFF", activebackground="#E3F2FD",
+                    relief="solid", bd=1, cursor="hand2",
+                    command=lambda n=name: self.add_item(n),
+                )
+            else:
+                btn = tk.Button(
+                    btn_frame,
+                    text="0",
+                    width=6, height=3,
+                    font=FONT_NORMAL,
+                    bg="#FFFFFF", activebackground="#E3F2FD",
+                    relief="solid", bd=1, cursor="hand2",
+                    command=lambda n=name: self.add_item(n),
+                )
+
             btn.bind("<Button-3>", lambda e, n=name: self.remove_item(n))
             btn.grid(row=i // COLS, column=i % COLS, padx=2, pady=2)
             self.buttons[name] = btn
@@ -199,7 +270,7 @@ class ComboRecorder:
         prop_list_frame.grid_columnconfigure(0, weight=1)
 
         prop_scroll = tk.Scrollbar(prop_list_frame, orient="vertical")
-        self.prop_listbox = tk.Listbox(prop_list_frame, height=6,
+        self.prop_listbox = tk.Listbox(prop_list_frame, height=5,
                                        font=FONT_MONO,
                                        yscrollcommand=prop_scroll.set,
                                        activestyle="none",
@@ -218,7 +289,7 @@ class ComboRecorder:
 
         # ============ 操作按钮 ============
         bottom = tk.Frame(root, bg="#FAFAFA")
-        bottom.grid(row=7, column=0, pady=8)
+        bottom.grid(row=7, column=0, pady=6)
 
         for text, cmd in [
             ("记录配方", self.record_combo),
@@ -310,7 +381,7 @@ class ComboRecorder:
         self.total_label.config(text=f"总数：{total} / 8")
 
         for name, btn in self.buttons.items():
-            btn.config(text=f"{name}\n{self.quantities[name]}")
+            btn.config(text=str(self.quantities[name]))
 
         parts = []
         for _, name in self.ingredients:
@@ -450,35 +521,21 @@ if __name__ == "__main__":
 
     # ---------- 动态选择跨平台字体 ----------
     def get_font(family_candidates, size, weight="normal"):
-        """根据系统可用字体返回 tkfont.Font 对象"""
         available = set(tkfont.families())
         for family in family_candidates:
             if family in available:
                 return tkfont.Font(family=family, size=size, weight=weight)
-        # 如果都没找到，返回默认字体
         return tkfont.Font(size=size, weight=weight)
 
-    # 中文字体候选（按优先级）
     CN_FAMILIES = [
-        "Microsoft YaHei",      # Windows
-        "PingFang SC",          # macOS
-        "Noto Sans CJK SC",     # Ubuntu (fonts-noto-cjk)
-        "WenQuanYi Micro Hei",  # Ubuntu (fonts-wqy-microhei)
-        "WenQuanYi Zen Hei",    # Ubuntu (fonts-wqy-zenhei)
-        "SimHei",               # Windows 备选
-        "sans-serif",           # 保底
+        "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC",
+        "WenQuanYi Micro Hei", "WenQuanYi Zen Hei", "SimHei", "sans-serif",
     ]
-
-    # 等宽字体候选（按优先级）
     MONO_FAMILIES = [
-        "Consolas",             # Windows
-        "DejaVu Sans Mono",     # Ubuntu 常见
-        "Noto Sans Mono",       # Ubuntu 常见
-        "Courier New",          # 跨平台备选
-        "monospace",            # 保底
+        "Consolas", "DejaVu Sans Mono", "Noto Sans Mono",
+        "Courier New", "monospace",
     ]
 
-    # 生成全局字体对象
     FONT_NORMAL = get_font(CN_FAMILIES, 10)
     FONT_BOLD = get_font(CN_FAMILIES, 10, "bold")
     FONT_TITLE = get_font(CN_FAMILIES, 14, "bold")
@@ -486,10 +543,16 @@ if __name__ == "__main__":
     FONT_MONO = get_font(MONO_FAMILIES, 10)
     FONT_SEED = get_font(MONO_FAMILIES, 12)
 
-    # 设置全局默认字体
     root.option_add("*Font", FONT_NORMAL)
 
     ingredients = load_ingredients()
     props = load_props()
-    app = ComboRecorder(root, ingredients, props)
+
+    item_names_in_order = [name for _, name in ingredients]
+    sprites, sprite_refs = load_sprites(
+        SPRITE_SHEET, item_names_in_order, SPRITE_SIZE
+    )
+
+    app = ComboRecorder(root, ingredients, props, sprites)
+    app._sprite_refs = sprite_refs   # 防止 PhotoImage 被 GC
     root.mainloop()
