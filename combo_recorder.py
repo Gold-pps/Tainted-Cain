@@ -1,6 +1,8 @@
 import os
+import re
+import glob
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, filedialog
 from openpyxl import load_workbook
 import tkinter.font as tkfont
 
@@ -8,6 +10,9 @@ from seed import str2seed, is_valid_seed
 
 INGREDIENTS_FILE = "合成宝袋组件.xlsx"
 PROPS_FILE = "以撒的结合忏悔+_全道具信息表.xlsx"
+
+# 模组（crafting_recorder）用 Isaac.SaveModData 落盘的目录名
+MOD_DATA_DIR_NAME = "crafting_recorder"
 
 # ============ 精灵图配置 ============
 SPRITE_SHEET = "Crafting_ui_sprite.png"
@@ -59,6 +64,59 @@ def parse_record(line):
     return parts[0], "", ""
 
 
+def game_root_candidates():
+    """以撒游戏安装目录的候选路径。
+
+    可通过环境变量 ISAAC_GAME_DIR 直接指定。
+    """
+    roots = []
+    env = os.environ.get("ISAAC_GAME_DIR")
+    if env:
+        roots.append(env)
+
+    game_name = "The Binding of Isaac Rebirth"
+    for drive in ("C:", "D:", "E:", "F:", "G:"):
+        roots.append(os.path.join(drive + os.sep, "Program Files (x86)",
+                                  "Steam", "steamapps", "common", game_name))
+        roots.append(os.path.join(drive + os.sep, "Program Files", "Steam",
+                                  "steamapps", "common", game_name))
+        roots.append(os.path.join(drive + os.sep, "SteamLibrary",
+                                  "steamapps", "common", game_name))
+        roots.append(os.path.join(drive + os.sep, "Steam", "steamapps",
+                                  "common", game_name))
+    return roots
+
+
+def find_mod_saves():
+    """查找 Crafting Recorder 模组的所有 ModData 存档（save1/2/3.dat）。
+
+    模组用 Isaac.SaveModData 落盘，实际位置是游戏安装目录下的
+    ``data\\crafting_recorder\\save<槽位>.dat``。
+    不同存档槽位各有自己的文件、内容可能重叠，所以要把它们全部读出来合并；
+    部分环境下也可能出现在「我的文档\\My Games」里，故两处都找。
+    """
+    found = []
+
+    def scan(base):
+        d = os.path.join(base, "data", MOD_DATA_DIR_NAME)
+        if os.path.isdir(d):
+            found.extend(glob.glob(os.path.join(d, "save*.dat")))
+
+    for root in game_root_candidates():
+        scan(root)
+
+    docs = os.path.join(os.path.expanduser("~"), "Documents", "My Games")
+    for game_dir in ("Binding of Isaac Repentance+",
+                     "Binding of Isaac Repentance"):
+        scan(os.path.join(docs, game_dir))
+
+    if not found:
+        return []
+    # 去重后按写入时间从旧到新排列：新的状态后处理，可以覆盖旧的
+    uniq = sorted({os.path.normcase(p) for p in found})
+    return sorted(uniq, key=os.path.getmtime)
+
+
 # ---------- 数据加载 ----------
 def load_ingredients():
     wb = load_workbook(INGREDIENTS_FILE)
@@ -72,6 +130,31 @@ def load_ingredients():
             items.append((int(order), str(name).strip()))
     items.sort()
     return items
+
+
+def load_ingredient_values():
+    """掉落物名称 -> 单件价值（《合成宝袋组件.xlsx》的“品质”列）"""
+    wb = load_workbook(INGREDIENTS_FILE, read_only=True)
+    ws = wb.active
+    values = {}
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not row or len(row) < 3:
+            continue
+        name, quality, order = row[0], row[1], row[2]
+        if name and order is not None:
+            try:
+                values[str(name).strip()] = int(quality)
+            except (TypeError, ValueError):
+                pass
+    return values
+
+
+def recipe_value(recipe, values):
+    """按配方字符串（如 红心2+硬币4+钥匙2）算掉落物价值之和"""
+    total = 0
+    for name, qty in re.findall(r"([^\d+|]+)(\d+)", recipe):
+        total += values.get(name.strip(), 0) * int(qty)
+    return total
 
 
 def load_props():
@@ -152,6 +235,19 @@ class ComboRecorder:
         self.seed = ""
         self.filename = get_filename("")
         self.combos = load_combinations(self.filename)
+
+        # 道具 ID -> 中文名，用于同步模组数据时补全记录
+        self.prop_id_to_name = {pid: cn for pid, _, cn in props}
+        # 掉落物名称 -> 单件价值，用于补全/计算“掉落物价值之和”
+        self.ingredient_values = load_ingredient_values()
+
+        # 模组自动同步状态
+        self._sync_paths = find_mod_saves()   # 各存档槽位的 save*.dat（可能多个）
+        self._sync_sigs = {}    # 路径 -> (大小, 修改时间) 指纹，用于判断是否有更新
+        self._sync_total = 0
+        self._sync_retry = 0
+        self._sync_status_text = ""
+        self._sync_cache = {}  # 非当前种子的记录文件 -> 行列表
 
         root.grid_columnconfigure(0, weight=1)
 
@@ -295,12 +391,21 @@ class ComboRecorder:
             ("记录配方", self.record_combo),
             ("清空当前", self.clear_current),
             ("删除记录文件", self.clear_records),
+            ("导入记录", self.import_records),
+            ("导出记录", self.export_records),
         ]:
             tk.Button(bottom, text=text, width=12,
                       font=FONT_NORMAL,
                       bg="#FFFFFF", activebackground="#E3F2FD",
                       relief="solid", bd=1, cursor="hand2",
                       command=cmd).pack(side="left", padx=5)
+
+        # 手动记录时标记是否持有十字圣球（会改变合成袋产出的品质）
+        self.orb_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(bottom, text="有十字圣球", variable=self.orb_var,
+                       font=FONT_NORMAL, bg="#FAFAFA",
+                       activebackground="#FAFAFA",
+                       cursor="hand2").pack(side="left", padx=(8, 0))
 
         # ============ 已记录列表 ============
         list_frame = tk.Frame(root, bg="#FAFAFA")
@@ -309,9 +414,17 @@ class ComboRecorder:
         list_frame.grid_columnconfigure(0, weight=1)
         list_frame.grid_rowconfigure(1, weight=1)
 
-        tk.Label(list_frame, text="已记录：",
+        header = tk.Frame(list_frame, bg="#FAFAFA")
+        header.grid(row=0, column=0, sticky="ew")
+
+        tk.Label(header, text="已记录：",
                  font=FONT_BOLD,
-                 bg="#FAFAFA", fg="#424242").grid(row=0, column=0, sticky="w")
+                 bg="#FAFAFA", fg="#424242").pack(side="left")
+
+        self.sync_label = tk.Label(header, text="",
+                                   font=FONT_SMALL,
+                                   bg="#FAFAFA", fg="#9E9E9E")
+        self.sync_label.pack(side="right")
 
         inner = tk.Frame(list_frame, bg="#FAFAFA")
         inner.grid(row=1, column=0, sticky="nsew")
@@ -330,6 +443,7 @@ class ComboRecorder:
 
         self.refresh_record_list()
         self.update_display()
+        self._poll_mod_data()
 
     # ---------- 种子 ----------
     def apply_seed(self):
@@ -351,6 +465,7 @@ class ComboRecorder:
         self.seed = seed
         self.filename = get_filename(seed)
         self.combos = load_combinations(self.filename)
+        self._sync_cache.pop(self.filename, None)
 
         if seed:
             self.seed_status.config(
@@ -486,7 +601,11 @@ class ComboRecorder:
         recipe = "+".join(parts)
 
         pid, en, cn = self.selected_prop
-        record = f"{recipe}|{pid}|{cn}"
+        value = sum(self.quantities[n] * self.ingredient_values.get(n, 0)
+                    for n in self.quantities)
+        orb = "是" if self.orb_var.get() else "否"
+        # 手动记录 = 已实际合成
+        record = f"{recipe}|{pid}|{cn}|{value}|是|{orb}"
 
         existing_recipes = {parse_record(r)[0] for r in self.combos}
         if recipe in existing_recipes:
@@ -496,7 +615,8 @@ class ComboRecorder:
         save_combination(self.filename, record)
         self.combos.append(record)
         self.listbox.insert(tk.END, record)
-        self.recipe_label.config(text=f"✅ 已记录：{recipe} → {pid} {cn}", fg="#2E7D32")
+        self.recipe_label.config(
+            text=f"✅ 已记录：{recipe} → {pid} {cn}（价值 {value}）", fg="#2E7D32")
 
     def refresh_record_list(self):
         self.listbox.delete(0, tk.END)
@@ -513,7 +633,176 @@ class ComboRecorder:
             os.remove(self.filename)
         self.combos.clear()
         self.listbox.delete(0, tk.END)
+        self._sync_cache.pop(self.filename, None)
         messagebox.showinfo("完成", "记录已清空。")
+
+
+    # ---------- 模组数据同步 ----------
+    def _poll_mod_data(self):
+        try:
+            # 存档还没生成时（例如刚装模组、还没合成过）定期重新查找
+            if not self._sync_paths or \
+                    not any(os.path.exists(p) for p in self._sync_paths):
+                self._sync_retry += 1
+                if self._sync_retry >= 4:
+                    self._sync_retry = 0
+                    self._sync_paths = find_mod_saves()
+                    self._sync_sigs = {}
+
+            found = [p for p in self._sync_paths if os.path.exists(p)]
+            added = self.sync_from_mod() if found else 0
+            if added:
+                self._sync_total += added
+            if found:
+                names = "、".join(os.path.basename(p) for p in found)
+                text = f"模组同步：已导入 {self._sync_total} 条 · {names}"
+            else:
+                text = "模组同步：未找到模组存档"
+            if text != self._sync_status_text:
+                self._sync_status_text = text
+                self.sync_label.config(text=text)
+        except Exception:
+            pass
+        self.root.after(1500, self._poll_mod_data)
+
+    def sync_from_mod(self):
+        """读取所有槽位的模组存档，返回本次新增（不含更新）的记录条数。"""
+        added = 0
+        for path in self._sync_paths:
+            if not os.path.exists(path):
+                continue
+            # 模组会整份重写存档，因此用 (大小, 修改时间) 判断是否有变化，
+            # 而不是只读增量——否则“否 -> 是”这类等长原地更新会被漏掉。
+            st = os.stat(path)
+            sig = (st.st_size, st.st_mtime_ns)
+            if self._sync_sigs.get(path) == sig:
+                continue
+            self._sync_sigs[path] = sig
+            added += self._sync_lines_from(path)
+        return added
+
+    def _sync_lines_from(self, path):
+        """解析单个槽位存档，返回新增记录条数。
+
+        模组每行格式：配方|道具ID|中文名|种子|价值|是否合成|十字圣球
+        落盘格式：   配方|道具ID|中文名|价值|是否合成|十字圣球
+        """
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+
+        added = 0
+        for line in content.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("|")
+            if len(parts) < 2:
+                continue
+            recipe = parts[0]
+            try:
+                pid = int(parts[1])
+            except ValueError:
+                continue
+            cn = self.prop_id_to_name.get(pid) or \
+                (parts[2] if len(parts) > 2 else "")
+            seed = normalize_seed(parts[3]) if len(parts) > 3 and parts[3] else ""
+            value = parts[4] if len(parts) > 4 else \
+                str(recipe_value(recipe, self.ingredient_values))
+            crafted = parts[5] if len(parts) > 5 and parts[5] else "-"
+            orb = parts[6] if len(parts) > 6 and parts[6] else "-"
+            record = f"{recipe}|{pid}|{cn}|{value}|{crafted}|{orb}"
+            if self._upsert_record(get_filename(seed), recipe, record) == "new":
+                added += 1
+        return added
+
+    def _lines_for(self, filename):
+        """记录文件在内存中的行列表（当前种子直接用 self.combos）"""
+        if filename == self.filename:
+            return self.combos
+        if filename not in self._sync_cache:
+            self._sync_cache[filename] = load_combinations(filename)
+        return self._sync_cache[filename]
+
+    def _upsert_record(self, filename, recipe, record):
+        """按配方去重写入；已存在但内容不同则原地更新。
+
+        返回 "new" / "updated" / None（无变化）。
+        """
+        lines = self._lines_for(filename)
+        for i, line in enumerate(lines):
+            if parse_record(line)[0] != recipe:
+                continue
+
+            # 同一个配方可能同时出现在多个槽位存档里，合并时：
+            #   - “价值 / 十字圣球”不要用未知的 “-” 盖掉已有信息
+            #   - “是否合成”只从否升级为是，不回退
+            old = line.split("|")
+            new = record.split("|")
+            old += ["-"] * (len(new) - len(old))
+            for k in (3, 5):
+                if old[k] not in ("", "-") and new[k] in ("", "-"):
+                    new[k] = old[k]
+            if old[4] == "是":
+                new[4] = "是"
+            record = "|".join(new)
+
+            if line == record:
+                return None
+            lines[i] = record
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+            if filename == self.filename:
+                self.refresh_record_list()
+            return "updated"
+
+        save_combination(filename, record)
+        lines.append(record)
+        if filename == self.filename:
+            self.listbox.insert(tk.END, record)
+        return "new"
+
+    # ---------- 导入 / 导出 ----------
+    def import_records(self):
+        path = filedialog.askopenfilename(
+            title="选择要导入的记录文件",
+            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")])
+        if not path:
+            return
+        existing = {parse_record(r)[0] for r in self.combos}
+        added = 0
+        for line in load_combinations(path):
+            recipe, pid, cn = parse_record(line)
+            if recipe and recipe not in existing:
+                parts = line.split("|")
+                if len(parts) < 6:
+                    # 旧格式：补价值列，“是否合成 / 十字圣球”标为未知
+                    parts = [recipe, pid, cn,
+                             str(recipe_value(recipe, self.ingredient_values))]
+                    parts += ["-"] * (6 - len(parts))
+                record = "|".join(parts)
+                save_combination(self.filename, record)
+                self.combos.append(record)
+                existing.add(recipe)
+                added += 1
+        self._sync_cache.pop(self.filename, None)
+        self.refresh_record_list()
+        messagebox.showinfo("导入完成", f"导入 {added} 条新记录。")
+
+    def export_records(self):
+        if not self.combos:
+            messagebox.showinfo("提示", "当前没有可导出的记录。")
+            return
+        path = filedialog.asksaveasfilename(
+            title="导出记录",
+            defaultextension=".txt",
+            initialfile=self.filename,
+            filetypes=[("文本文件", "*.txt")])
+        if not path:
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(self.combos) + "\n")
+        messagebox.showinfo("导出完成",
+                            f"已导出 {len(self.combos)} 条记录到：\n{path}")
 
 
 if __name__ == "__main__":

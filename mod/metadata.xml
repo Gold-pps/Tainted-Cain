@@ -1,0 +1,8 @@
+<metadata>
+    <name>Crafting Recorder</name>
+    <directory>crafting_recorder</directory>
+    <id>3400000001</id>
+    <description>自动记录合成宝袋的配方与合成结果，供外部 Python 工具同步（需要 REPENTOGON）</description>
+    <version>1.0</version>
+    <visibility/>
+</metadata>
