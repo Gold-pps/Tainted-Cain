@@ -149,6 +149,14 @@ def load_ingredient_values():
     return values
 
 
+def as_count(s):
+    """把记录里的“本局合成次数”解析成整数，'-'/空当作 0"""
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return 0
+
+
 def recipe_value(recipe, values):
     """按配方字符串（如 红心2+硬币4+钥匙2）算掉落物价值之和"""
     total = 0
@@ -195,13 +203,13 @@ def load_sprites(sheet_path, item_names, size=40):
     refs = []
 
     if not os.path.exists(sheet_path):
-        print(f"⚠️ 找不到 {sheet_path}，将使用纯文字按钮")
+        print(f"注意：找不到 {sheet_path}，将使用纯文字按钮")
         return sprites, refs
 
     try:
         sheet = Image.open(sheet_path).convert("RGBA")
     except Exception as e:
-        print(f"⚠️ 打开 {sheet_path} 失败：{e}")
+        print(f"注意：打开 {sheet_path} 失败：{e}")
         return sprites, refs
 
     for i, name in enumerate(item_names):
@@ -604,12 +612,13 @@ class ComboRecorder:
         value = sum(self.quantities[n] * self.ingredient_values.get(n, 0)
                     for n in self.quantities)
         orb = "是" if self.orb_var.get() else "否"
-        # 手动记录 = 已实际合成
-        record = f"{recipe}|{pid}|{cn}|{value}|是|{orb}"
+        # 手动记录 = 已实际合成，合成次数记为 1
+        record = f"{recipe}|{pid}|{cn}|{value}|是|{orb}|1"
 
-        existing_recipes = {parse_record(r)[0] for r in self.combos}
-        if recipe in existing_recipes:
-            self.recipe_label.config(text=f"🔁 该配方已记录过：{recipe}", fg="#F57C00")
+        existing = {r.split("|")[0] + "|" + r.split("|")[1] for r in self.combos}
+        if f"{recipe}|{pid}" in existing:
+            self.recipe_label.config(
+                text=f"🔁 该配方产物已记录过：{recipe} → {pid} {cn}", fg="#F57C00")
             return
 
         save_combination(self.filename, record)
@@ -684,8 +693,8 @@ class ComboRecorder:
     def _sync_lines_from(self, path):
         """解析单个槽位存档，返回新增记录条数。
 
-        模组每行格式：配方|道具ID|中文名|种子|价值|是否合成|十字圣球
-        落盘格式：   配方|道具ID|中文名|价值|是否合成|十字圣球
+        模组每行格式：配方|道具ID|中文名|种子|价值|是否合成|十字圣球|本局合成次数
+        落盘格式：   配方|道具ID|中文名|价值|是否合成|十字圣球|本局合成次数
         """
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
@@ -710,7 +719,14 @@ class ComboRecorder:
                 str(recipe_value(recipe, self.ingredient_values))
             crafted = parts[5] if len(parts) > 5 and parts[5] else "-"
             orb = parts[6] if len(parts) > 6 and parts[6] else "-"
-            record = f"{recipe}|{pid}|{cn}|{value}|{crafted}|{orb}"
+            count = parts[7] if len(parts) > 7 and parts[7] else "-"
+            if count == "-":
+                # 旧记录没有次数栏：已合成按 1，明确没合成的按 0
+                if crafted == "是":
+                    count = "1"
+                elif crafted == "否":
+                    count = "0"
+            record = f"{recipe}|{pid}|{cn}|{value}|{crafted}|{orb}|{count}"
             if self._upsert_record(get_filename(seed), recipe, record) == "new":
                 added += 1
         return added
@@ -729,13 +745,16 @@ class ComboRecorder:
         返回 "new" / "updated" / None（无变化）。
         """
         lines = self._lines_for(filename)
+        # 按「配方+产物」去重：同一配方的不同产物（例如圣球改变了产出）是两条记录
+        target = "|".join(record.split("|")[:2])
         for i, line in enumerate(lines):
-            if parse_record(line)[0] != recipe:
+            if "|".join(line.split("|")[:2]) != target:
                 continue
 
             # 同一个配方可能同时出现在多个槽位存档里，合并时：
             #   - “价值 / 十字圣球”不要用未知的 “-” 盖掉已有信息
             #   - “是否合成”只从否升级为是，不回退
+            #   - “本局合成次数”只增不减
             old = line.split("|")
             new = record.split("|")
             old += ["-"] * (len(new) - len(old))
@@ -744,6 +763,8 @@ class ComboRecorder:
                     new[k] = old[k]
             if old[4] == "是":
                 new[4] = "是"
+            if len(old) > 6 and len(new) > 6 and as_count(old[6]) > as_count(new[6]):
+                new[6] = old[6]
             record = "|".join(new)
 
             if line == record:
@@ -768,21 +789,23 @@ class ComboRecorder:
             filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")])
         if not path:
             return
-        existing = {parse_record(r)[0] for r in self.combos}
+        existing = {"|".join(r.split("|")[:2]) for r in self.combos}
         added = 0
         for line in load_combinations(path):
             recipe, pid, cn = parse_record(line)
-            if recipe and recipe not in existing:
+            key = "|".join(line.split("|")[:2])
+            if recipe and key not in existing:
                 parts = line.split("|")
-                if len(parts) < 6:
-                    # 旧格式：补价值列，“是否合成 / 十字圣球”标为未知
-                    parts = [recipe, pid, cn,
-                             str(recipe_value(recipe, self.ingredient_values))]
-                    parts += ["-"] * (6 - len(parts))
+                if len(parts) < 7:
+                    # 旧格式：缺哪栏补哪栏，价值可以算出来，其余标为未知
+                    if len(parts) == 3:
+                        parts.append(str(
+                            recipe_value(recipe, self.ingredient_values)))
+                    parts += ["-"] * (7 - len(parts))
                 record = "|".join(parts)
                 save_combination(self.filename, record)
                 self.combos.append(record)
-                existing.add(recipe)
+                existing.add(key)
                 added += 1
         self._sync_cache.pop(self.filename, None)
         self.refresh_record_list()

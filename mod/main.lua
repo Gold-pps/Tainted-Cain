@@ -6,7 +6,7 @@
 --   记录追加写入 ModData（Isaac.SaveModData），供外部 Python 工具读取。
 --   为了不影响游戏体验，记录时不显示任何游戏内提示。
 --
--- 记录格式：配方|道具ID|道具中文名|种子|掉落物价值之和|是否合成|十字圣球
+-- 记录格式：配方|道具ID|道具中文名|种子|掉落物价值之和|是否合成|十字圣球|本局合成次数
 --   道具中文名来自同目录的 item_names_zh.lua（由《以撒的结合忏悔+_全道具信息表.xlsx》
 --   生成）。游戏内 ItemConfig.Name 只会给出 #XXX_NAME 这类语言键，所以要靠该表翻译；
 --   表里没有的 ID 才会退回游戏内的英文名/语言键。
@@ -14,6 +14,9 @@
 --   是否合成：凑满袋子即记录为“否”，真的挥袋合成后原地更新为“是”。
 --   十字圣球：记录该配方时角色是否持有十字圣球（会改变合成袋产出的品质）。
 --   若持有圣球后同一配方产出变了，会按新的产物 ID 单独记一行；产出没变则原地更新该标记。
+--   本局合成次数：该配方在这一局（同一存档、同一种子）被真正搓出来的次数。
+--   只是凑满袋子不算，每挥袋合成一次 +1；按「种子+配方+产物」各自计数 ——
+--   圣球把产物改变时，两种产物各有自己的次数。
 --
 -- 存档位置（Windows，注意在游戏安装目录，不是"我的文档"）：
 --   <游戏目录>\data\crafting_recorder\save<存档槽位>.dat
@@ -77,6 +80,7 @@ local state = {
     lines = {},         -- 已捕获的记录行（持久化到 ModData）
     lineIndex = {},     -- 记录行 -> 在 lines 中的下标（用于原地更新）
     keyLine = {},       -- seed|recipe|output -> 当前对应的记录行
+    craftCount = {},    -- seed|recipe|output -> 本局已合成次数
     loaded = false,     -- 是否已成功读到过 ModData
     loadTries = 0,      -- 载入尝试次数（时机未到时允许重试，但有上限）
 }
@@ -163,6 +167,8 @@ local function keyOfFields(f)
     return f[4] .. "|" .. f[1] .. "|" .. f[2]
 end
 
+-- 合成次数与记录同键：种子+配方+产物
+
 -- 把一行记录加入内存（整行去重），返回是否为新增
 local function registerLine(line)
     if not line or line == "" then
@@ -174,9 +180,20 @@ local function registerLine(line)
     state.lines[#state.lines + 1] = line
     state.lineIndex[line] = #state.lines
 
-    local key = keyOfFields(splitFields(line))
+    local f = splitFields(line)
+    local key = keyOfFields(f)
     if key then
         state.keyLine[key] = line
+    end
+
+    -- 从存档里恢复该记录的合成次数；旧记录没有这一栏时，
+    -- 只要“是否合成”是“是”，至少可以确定合成过 1 次
+    local n = tonumber(f[8])
+    if not n and f[6] == "是" then
+        n = 1
+    end
+    if key and n and n > (state.craftCount[key] or 0) then
+        state.craftCount[key] = n
     end
     return true
 end
@@ -250,10 +267,10 @@ local function itemNameOf(output)
 end
 
 -- 写入/更新一条记录（按 seed|recipe|output 去重）
---   crafted = false：刚凑满袋子，还没真的合成
---   crafted = true ：确实挥袋合成了，把“是否合成”原地更新为“是”
+--   craftedEvent = false：刚凑满袋子，还没真的合成
+--   craftedEvent = true ：确实挥袋合成了（同时把“本局合成次数” +1）
 --   player 用于判断当前是否持有十字圣球
-local function upsertRecord(bag, output, crafted, player)
+local function upsertRecord(bag, output, craftedEvent, player)
     if not output or output <= 0 then
         return false
     end
@@ -271,13 +288,22 @@ local function upsertRecord(bag, output, crafted, player)
     local old = state.keyLine[key]
 
     -- “是否合成”只会从否变成是；同一个配方再凑一次也不会回退成否
+    local crafted = craftedEvent
     if old and splitFields(old)[6] == "是" then
         crafted = true
     end
 
+    -- 本局合成次数：只有真的合成事件才 +1（凑满袋子不算），
+    -- 按「种子+配方+产物」各自计数
+    if craftedEvent then
+        state.craftCount[key] = (state.craftCount[key] or 0) + 1
+    end
+    local count = state.craftCount[key] or 0
+
     local line = recipe .. "|" .. output .. "|" .. itemNameOf(output) .. "|"
         .. seedStr .. "|" .. buildValue(bag) .. "|" .. (crafted and "是" or "否")
         .. "|" .. (hasSacredOrb(player) and "是" or "否")
+        .. "|" .. count
 
     if old == line then
         return false   -- 内容完全没有变化
