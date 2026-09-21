@@ -85,6 +85,82 @@ def new_state():
     }
 
 
+def load_all_names(excel_path):
+    """读取所有道具的 ID -> 中文名（包含被 -1 排除的），只用于提示信息"""
+    try:
+        df = pd.read_excel(excel_path, sheet_name=SHEET_NAME)
+    except Exception:
+        return {}
+    names = {}
+    for _, row in df.iterrows():
+        try:
+            names[int(row['道具ID'])] = str(row['中文名'])
+        except (TypeError, ValueError, KeyError):
+            continue
+    return names
+
+
+def sanitize_state(state, item_dict, total, names=None):
+    """清理状态中已经不在道具表里的 ID。
+
+    源表是可能被改的（例如把某个道具的里该隐评级改成 -1 排除掉），
+    这时状态文件里还留着它的 ID，直接用会 KeyError。
+    """
+    names = names or {}
+    changed = False
+
+    def label(item_id):
+        return f"{item_id}" + (f"（{names[item_id]}）" if item_id in names else "")
+
+    dropped = [i for i in state['sorted_ids'] if i not in item_dict]
+    if dropped:
+        state['sorted_ids'] = [i for i in state['sorted_ids'] if i in item_dict]
+        changed = True
+        shown = "、".join(label(i) for i in dropped[:10])
+        more = "…" if len(dropped) > 10 else ""
+        print(f"注意：{len(dropped)} 个道具已不在道具表里（可能被你改成 -1 了），"
+              f"已从排序中移除：{shown}{more}")
+
+    if state.get('rerate_id') is not None and state['rerate_id'] not in item_dict:
+        print(f"注意：正在重新评级的道具 {label(state['rerate_id'])} 已不在道具表里，"
+              f"已取消该会话。")
+        state['rerate_id'] = None
+        state['rerate_low'] = 0
+        state['rerate_high'] = 0
+        changed = True
+
+    if state['current_item_id'] is not None and \
+            state['current_item_id'] not in item_dict:
+        print(f"注意：正在插入的道具 {label(state['current_item_id'])} 已不在道具表里，"
+              f"已跳过它。")
+        state['current_item_id'] = None
+        state['low'] = 0
+        state['high'] = 0
+        changed = True
+
+    # 列表变短后，比较区间可能越界，夹回合法范围
+    n = len(state['sorted_ids'])
+    if state['low'] > n:
+        state['low'] = n
+        changed = True
+    if state['high'] >= n:
+        state['high'] = n - 1
+        changed = True
+    if state['rerate_low'] > n:
+        state['rerate_low'] = n
+        changed = True
+    if state['rerate_high'] >= n:
+        state['rerate_high'] = n - 1
+        changed = True
+    if state['next_index'] > total:
+        state['next_index'] = total
+        changed = True
+
+    if changed:
+        save_state(state)
+    return changed
+
+
 def format_item(item):
     lines = [
         f"ID: {item['id']}",
@@ -178,8 +254,9 @@ def ask_rank(max_rank):
 
 
 def report_pos(state, item_dict, item_id, pos, prefix):
-    it = item_dict[item_id]
-    print(f"\n>>> {prefix}：{it['中文名']}（ID: {it['id']}）"
+    it = item_dict.get(item_id)
+    name = it['中文名'] if it else '(不在道具表里)'
+    print(f"\n>>> {prefix}：{name}（ID: {item_id}）"
           f"→ 第 {pos + 1} 名（当前共 {len(state['sorted_ids'])} 个）")
 
 
@@ -251,6 +328,25 @@ def compare_step(state, items, item_dict, which):
         title = "待插入道具："
     low, high = state[k_low], state[k_high]
 
+    # 源表被改动过时，正在处理的这个道具可能已经不在道具表里了
+    if item_id not in item_dict:
+        print(f"注意：道具 {item_id} 已不在道具表里，跳过这个会话。")
+        if which == 'rerate':
+            state['rerate_id'] = None
+            state['rerate_low'] = 0
+            state['rerate_high'] = 0
+        else:
+            state['current_item_id'] = None
+            state['low'] = 0
+            state['high'] = 0
+        save_state(state)
+        return 'continue'
+
+    # 列表变短后比较区间可能越界，夹回合法范围
+    if high >= len(sorted_ids):
+        high = len(sorted_ids) - 1
+        state[k_high] = high
+
     # 找到位置 → 插入
     if low > high:
         pos = low
@@ -273,8 +369,21 @@ def compare_step(state, items, item_dict, which):
 
     mid = (low + high) // 2
     mid_id = sorted_ids[mid]
-    current_item = item_dict[item_id]
-    mid_item = item_dict[mid_id]
+    current_item = item_dict.get(item_id)
+    mid_item = item_dict.get(mid_id)
+    if mid_item is None:
+        # 排序列表里混进了已不在道具表里的 ID（源表被改过），剔除后重来
+        print(f"注意：排序列表里的 {mid_id} 已不在道具表里，已移除。")
+        sorted_ids.pop(mid)
+        save_state(state)
+        return 'continue'
+    if current_item is None:
+        print(f"注意：道具 {item_id} 已不在道具表里，跳过这个会话。")
+        state['current_item_id'] = None
+        state['low'] = 0
+        state['high'] = 0
+        save_state(state)
+        return 'continue'
 
     print("\n" + "=" * 60)
     print(title)
@@ -533,6 +642,7 @@ def main():
         if state is None:
             print("没有找到状态文件，先跑一次评级（不加参数）再来查看。")
             return
+        sanitize_state(state, item_dict, total, load_all_names(excel_path))
         if show_start is not None:
             print()
             print_ranking(state, item_dict, show_start, show_count)
@@ -587,6 +697,9 @@ def main():
         if state is None:
             state = new_state()
             save_state(state)
+        else:
+            # 源表可能被改过（例如把道具改成 -1 排除掉），先清理状态
+            sanitize_state(state, item_dict, total, load_all_names(excel_path))
 
     while True:
         sorted_ids = state['sorted_ids']
@@ -598,15 +711,20 @@ def main():
                 return
             continue
 
-        # 2) 取下一个待插入的道具
+        # 2) 取下一个待插入的道具：按源表顺序找第一个还没排名的
+        #    （不依赖历史下标，这样在源表里增删/调整行、或把 -1 改回正常值都不会错位）
         if state['current_item_id'] is None:
-            while state['next_index'] < total and \
-                    items[state['next_index']]['id'] in sorted_ids:
-                state['next_index'] += 1   # 手动插入过的道具直接跳过
-            if state['next_index'] >= total:
+            ranked = set(sorted_ids)
+            next_idx = None
+            for k, it in enumerate(items):
+                if it['id'] not in ranked:
+                    next_idx = k
+                    break
+            if next_idx is None:
                 print("\n所有道具已评级完成！")
                 break
-            current_item = items[state['next_index']]
+            state['next_index'] = next_idx
+            current_item = items[next_idx]
             state['current_item_id'] = current_item['id']
             state['low'] = 0
             state['high'] = len(sorted_ids) - 1
