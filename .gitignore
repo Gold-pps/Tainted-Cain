@@ -46,3 +46,7 @@ Thumbs.db
 *.log
 
 *.txt
+
+# 生成物（数据库导出 / 存档快照）
+导出/
+snapshots/

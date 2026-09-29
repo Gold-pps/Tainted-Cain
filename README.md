@@ -57,6 +57,15 @@
 | `test_font.py` / `test_font2.py` | 跨平台字体可用性检测 |
 | `组件.csv` | 早期版本的掉落物价值表（已被 xlsx 取代） |
 | `src/tainted_cain/` | `uv init` 生成的占位包，未使用 |
+| `rating.py` | 里该隐评级工具：二分插入式两两比较（见「里该隐评级工具」一节） |
+| `rating_state.json` | `rating.py` 的进度文件（只存道具 ID，用 `--show` 可带名字查看） |
+| `里该隐评级_从低到高.xlsx` | `rating.py` 的最终结果 |
+| `里该隐评级_进度.xlsx` | `rating.py --dump` 导出的进度快照（可在 Excel 里查看/改顺序） |
+| `export_excel.py` | 把库里的表/视图导出为 xlsx，也可导任意 SQL 结果 |
+| `export_excel.bat` | 双击即可导出到 `导出\` 目录 |
+| `导出/` | 生成物：导出的 xlsx（已被 `.gitignore` 忽略） |
+| `snapshots/` | 生成物：模组存档的备份副本（已被 `.gitignore` 忽略） |
+| `Daily_test.sql` / `Is_.Death_Certificate_crafted.sql` | 自用查询脚本，在 Workbench 里打开执行 |
 
 ---
 
@@ -67,7 +76,7 @@
 - Windows（脚本内置 Steam 默认安装路径，可用环境变量 `ISAAC_GAME_DIR` 覆盖）
 - Python ≥ 3.13 + [uv](https://docs.astral.sh/uv/)
 - 《以撒的结合：忏悔+》+ [REPENTOGON](https://repentogon.com/docs.html)
-- MySQL 8（仅在需要数据库时）
+- MySQL 8.x 及以上（仅在需要数据库时；已在 8.0 与 26.7 上验证）
 
 ```bash
 uv sync          # 安装依赖：openpyxl / pillow / pymysql
@@ -125,6 +134,32 @@ setx ISAAC_DB_PASSWORD "你的密码"      # 写进用户环境变量
 
 之后**双击 `import_db.bat`**（等价于 `uv run import_to_mysql.py`）。
 建议每次玩完游戏跑一次 —— `save*.dat` 随时可能被游戏覆盖。
+
+### 4. 导出 Excel
+
+```bash
+# 双击 export_excel.bat：把 v_recipe / recipe_record / recipe_line / item / ingredient
+# 全部导出到「导出」目录（冻结表头 + 自动筛选，并附带 1/0 的中文列）
+
+uv run export_excel.py v_recipe          # 只导某一张表/视图
+uv run export_excel.py --sql "SELECT * FROM v_recipe WHERE sacred_orb = 1" --out 有圣球.xlsx
+```
+
+### 5. 里该隐评级工具（可选）
+
+给《全道具信息表》里的 700 多个道具做两两比较、排出「从低到高」的总顺序：
+
+```bash
+uv run rating.py                # 开始/继续比较；输入 q 保存退出
+uv run rating.py --show         # 带中文名查看当前排序（可加 起始名次 数量）
+uv run rating.py --find 大便    # 查某个道具排第几名
+uv run rating.py --dump         # 导出进度 xlsx（可在 Excel 里检查/改顺序）
+uv run rating.py --rebuild      # 从 xlsx 回灌顺序，继续比较
+```
+
+比较时可用 `l`（看清单）、`f`（查名次）、`r`（重新评级某个道具，修错）、`i`（手动指定名次）；
+全部评完后进入**校正模式**（`show` / `find` / `move` / `swap` / `export`）。
+注意：源表里的「里该隐评级」列是分组值，不能当排序判据；改动源表（增删行、把评级改成 `-1`）不会让进度错乱。
 
 ---
 
@@ -233,6 +268,9 @@ FROM v_recipe WHERE crafted = 0 ORDER BY seed_str, value DESC;
 | 进库查询 | `mysql -u isaac -p isaac` |
 | 单条查询 | `mysql -u isaac -p isaac -e "SELECT COUNT(*) FROM recipe_record;"` |
 | 导出整库备份 | `mysqldump -u isaac -p --result-file=isaac_dump.sql isaac` |
+| 导出 Excel | 双击 `export_excel.bat`，或 `uv run export_excel.py [表名]` |
+| 导任意查询为 Excel | `uv run export_excel.py --sql "SELECT ..." --out 文件名.xlsx` |
+| 里该隐评级工具 | `uv run rating.py`（查看：`--show` / `--find` / `--dump` / `--rebuild`） |
 
 环境变量：`ISAAC_GAME_DIR`、`ISAAC_DB_HOST`、`ISAAC_DB_PORT`、`ISAAC_DB_USER`、`ISAAC_DB_PASSWORD`、`ISAAC_DB_NAME`。
 
@@ -253,6 +291,18 @@ FROM v_recipe WHERE crafted = 0 ORDER BY seed_str, value DESC;
 8. **`import_db.bat` 里不能写中文注释**：cmd 按 GBK 解析批处理文件，中文会乱码并破坏语法。
 9. **Python 脚本的 `print` 不要用 emoji**：GBK 控制台会抛 `UnicodeEncodeError`（改成“注意：”这类纯文本）。
 10. **历史状态无法回溯**：已移除变更历史表，改用「导入前把源文件快照到 `snapshots/`」+「每日 `mysqldump`」。
+11. **`mysql` 客户端可能不在 PATH**：换 MySQL 版本后旧 PATH 条目会失效。用完整路径
+    `& "C:\Program Files\MySQL\MySQL Server <版本>\bin\mysql.exe" -u root -p`，
+    或临时 `$env:Path += ';C:\Program Files\MySQL\MySQL Server <版本>\bin'`。
+    导入/导出脚本走 Python 驱动，不受影响。
+12. **Workbench 的 `Export Resultset` 变灰**：常见原因是结果网格没有数据或没有焦点
+    （先执行查询，再点一下结果网格），或点错了入口 —— 正确入口是**结果网格上方的导出图标**，
+    或右键结果网格 → `Export Resultset`。另外「服务器比客户端新很多」的组合
+    （如 Workbench 8.0 连 MySQL 26.x）会禁用部分功能，这种情况直接用 `export_excel.bat`，
+    或换 HeidiSQL / DBeaver。
+13. **卸载/更换 MySQL 会连数据目录一起删掉**（默认 `C:\ProgramData\MySQL\MySQL Server <版本>\Data`）。
+    恢复三步：`SOURCE schema.sql` → 建 `isaac` 账号 → 跑 `import_db.bat`（记录会从模组存档重建）。
+    别把数据库当唯一副本，建议定期 `mysqldump`。
 
 ---
 
